@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Task store CLI — manages the SQLite task queue."""
 
-import sys
+import argparse
 import json
 import os
 import sqlite3
+import sys
 import uuid
-import argparse
 from datetime import datetime, timezone
 
 DB_PATH = os.environ.get("DB_PATH_OVERRIDE", "/home/opc/agentic-kanban/tasks.db")

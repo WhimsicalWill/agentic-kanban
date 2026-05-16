@@ -13,7 +13,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py39"
-extend-exclude = [".git", "__pycache__", "*.pyc"]
+extend-exclude = [".git", "__pycache__", "*.pyc", "timeout_test.py"]
 
 [tool.ruff.format]
 quote-style = "double"
