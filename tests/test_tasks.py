@@ -13,39 +13,13 @@ TASKS_PY = Path(__file__).parent.parent / "tasks.py"
 
 
 def make_db(path: str) -> None:
-    """Create the tasks + events schema at the given path."""
-    conn = sqlite3.connect(path)
-    conn.executescript("""
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            state TEXT NOT NULL DEFAULT 'inbox',
-            tags TEXT DEFAULT '[]',
-            priority INTEGER DEFAULT 5,
-            created_at TEXT,
-            state_changed_at TEXT,
-            iteration_count INTEGER DEFAULT 0,
-            blocked_reason TEXT,
-            agent_confidence TEXT,
-            parent_task TEXT,
-            executor TEXT DEFAULT 'claude-code',
-            claimed_by TEXT,
-            claimed_at TEXT,
-            output_summary TEXT,
-            session_id TEXT
-        );
-        CREATE TABLE events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            from_state TEXT,
-            to_state TEXT,
-            note TEXT,
-            created_at TEXT
-        );
-    """)
-    conn.close()
+    """Create the tasks + events schema via tasks.py init (single source of truth)."""
+    result = subprocess.run(
+        [sys.executable, str(TASKS_PY), "init"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+        env={**__import__("os").environ, "DB_PATH_OVERRIDE": path},
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def run(*args, db_path: str):

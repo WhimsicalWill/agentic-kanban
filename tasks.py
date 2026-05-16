@@ -10,6 +10,33 @@ import argparse
 from datetime import datetime, timezone
 
 DB_PATH = os.environ.get("DB_PATH_OVERRIDE", "/home/opc/agentic-kanban/tasks.db")
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'inbox',
+    tags TEXT DEFAULT '[]',
+    priority INTEGER DEFAULT 5,
+    created_at TEXT,
+    state_changed_at TEXT,
+    executor TEXT DEFAULT 'claude-code',
+    claimed_by TEXT,
+    claimed_at TEXT,
+    output_summary TEXT,
+    session_id TEXT
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT,
+    note TEXT,
+    created_at TEXT
+);
+"""
 VALID_STATES = ["inbox", "scoping", "ready", "in_progress", "awaiting_review",
                 "awaiting_client", "revision_queue", "watching", "done", "cancelled"]
 
@@ -222,6 +249,47 @@ def cmd_needs_review(args):
                 print(f"  Output: {t['output_summary']}")
 
 
+def cmd_init(args):
+    """Create the DB schema. Safe to run on an existing DB (uses IF NOT EXISTS)."""
+    with db() as conn:
+        conn.executescript(SCHEMA_SQL)
+    print(json.dumps({"status": "ok", "db": DB_PATH}))
+
+
+def cmd_migrate(args):
+    """Rebuild the tasks table to match the current schema, dropping stale columns.
+
+    Preserves all rows. Uses the create-copy-drop-rename workaround required
+    by SQLite < 3.35 which lacks ALTER TABLE DROP COLUMN.
+    """
+    keep = ["id", "title", "description", "state", "tags", "priority",
+            "created_at", "state_changed_at", "executor",
+            "claimed_by", "claimed_at", "output_summary", "session_id"]
+    cols = ", ".join(keep)
+    with db() as conn:
+        conn.executescript(f"""
+            CREATE TABLE tasks_new (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'inbox',
+                tags TEXT DEFAULT '[]',
+                priority INTEGER DEFAULT 5,
+                created_at TEXT,
+                state_changed_at TEXT,
+                executor TEXT DEFAULT 'claude-code',
+                claimed_by TEXT,
+                claimed_at TEXT,
+                output_summary TEXT,
+                session_id TEXT
+            );
+            INSERT INTO tasks_new ({cols}) SELECT {cols} FROM tasks;
+            DROP TABLE tasks;
+            ALTER TABLE tasks_new RENAME TO tasks;
+        """)
+    print(json.dumps({"status": "ok", "message": "tasks table rebuilt with current schema"}))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Task store CLI")
     sub = parser.add_subparsers(dest="cmd")
@@ -255,6 +323,8 @@ def main():
     p_next.add_argument("--run-id")
 
     sub.add_parser("needs-review", help="Show tasks awaiting your attention")
+    sub.add_parser("init", help="Create DB schema (safe to re-run)")
+    sub.add_parser("migrate", help="Rebuild tasks table to current schema, dropping stale columns")
 
     args = parser.parse_args()
     if not args.cmd:
@@ -264,7 +334,9 @@ def main():
     {"add": cmd_add, "list": cmd_list, "get": cmd_get,
      "update": cmd_update, "next": cmd_next,
      "follow-up": cmd_follow_up,
-     "needs-review": cmd_needs_review}[args.cmd](args)
+     "needs-review": cmd_needs_review,
+     "init": cmd_init,
+     "migrate": cmd_migrate}[args.cmd](args)
 
 
 if __name__ == "__main__":
