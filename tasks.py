@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     description TEXT DEFAULT '',
-    state TEXT NOT NULL DEFAULT 'inbox',
+    state TEXT NOT NULL DEFAULT 'awaiting_review',
     tags TEXT DEFAULT '[]',
     priority INTEGER DEFAULT 5,
     created_at TEXT,
@@ -37,8 +37,7 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT
 );
 """
-VALID_STATES = ["inbox", "scoping", "ready", "in_progress", "awaiting_review",
-                "awaiting_client", "revision_queue", "watching", "done", "cancelled"]
+VALID_STATES = ["ready", "in_progress", "awaiting_review", "watching", "done", "cancelled"]
 
 
 def db():
@@ -60,7 +59,7 @@ def fmt_task(row):
 def cmd_add(args):
     task_id = f"task_{uuid.uuid4().hex[:8]}"
     tags = json.dumps(args.tags or [])
-    state = args.state or "inbox"
+    state = args.state or "awaiting_review"
     ts = now()
     with db() as conn:
         conn.execute(
@@ -142,7 +141,7 @@ def cmd_follow_up(args):
     """Queue a follow-up prompt for a task that has a Claude Code session.
 
     Overwrites the task description with the new prompt and sets state to
-    'revision_queue' so the worker resumes the session on the next tick.
+    'ready' so the worker resumes the session on the next tick.
     """
     task_id = args.id
     ts = now()
@@ -162,7 +161,7 @@ def cmd_follow_up(args):
             sys.exit(1)
 
         updates = {
-            "state": "revision_queue",
+            "state": "ready",
             "state_changed_at": ts,
             "description": args.prompt,
             "session_id": session_id,
@@ -175,28 +174,24 @@ def cmd_follow_up(args):
         conn.execute(
             "INSERT INTO events (task_id, event_type, from_state, to_state, note, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, "follow-up", task["state"], "revision_queue", args.prompt, ts)
+            (task_id, "follow-up", task["state"], "ready", args.prompt, ts)
         )
 
     print(json.dumps({
         "id": task_id,
-        "state": "revision_queue",
+        "state": "ready",
         "session_id": session_id,
     }))
 
 
 def cmd_next(args):
-    """Claim the next actionable task. revision_queue/watching (resume) takes priority over ready (fresh)."""
+    """Claim the next actionable task. watching takes priority over ready."""
     run_id = args.run_id or f"run_{uuid.uuid4().hex[:8]}"
     ts = now()
     with db() as conn:
         row = None
         mode = None
-        for candidate_state, candidate_mode in [
-            ("revision_queue", "resume"),
-            ("watching", "watch"),
-            ("ready", "fresh"),
-        ]:
+        for candidate_state in ["watching", "ready"]:
             row = conn.execute(
                 """SELECT * FROM tasks
                    WHERE state = ?
@@ -207,7 +202,10 @@ def cmd_next(args):
                 (candidate_state,)
             ).fetchone()
             if row:
-                mode = candidate_mode
+                if candidate_state == "watching":
+                    mode = "watch"
+                else:
+                    mode = "resume" if row["session_id"] else "fresh"
                 break
 
         if not row:
@@ -273,7 +271,7 @@ def cmd_migrate(args):
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 description TEXT DEFAULT '',
-                state TEXT NOT NULL DEFAULT 'inbox',
+                state TEXT NOT NULL DEFAULT 'awaiting_review',
                 tags TEXT DEFAULT '[]',
                 priority INTEGER DEFAULT 5,
                 created_at TEXT,
@@ -300,8 +298,8 @@ def main():
     p_add.add_argument("--description", "-d")
     p_add.add_argument("--tags", nargs="*")
     p_add.add_argument("--priority", type=int, default=5)
-    p_add.add_argument("--state", "-s", choices=["inbox", "ready", "awaiting_review"],
-                       default="inbox")
+    p_add.add_argument("--state", "-s", choices=["awaiting_review", "ready"],
+                       default="awaiting_review")
 
     p_list = sub.add_parser("list", help="List tasks")
     p_list.add_argument("--state", "-s")

@@ -63,10 +63,10 @@ def add_task(db, title="Test task", description="", tags=None, priority=5):
 
 # ── add ───────────────────────────────────────────────────────────────────────
 
-def test_add_creates_inbox_task(db):
+def test_add_defaults_to_awaiting_review(db):
     code, out = run("add", "My task", db_path=db)
     assert code == 0
-    assert out["state"] == "inbox"
+    assert out["state"] == "awaiting_review"
     assert out["id"].startswith("task_")
 
 
@@ -101,7 +101,7 @@ def test_list_excludes_done_and_cancelled(db):
 
 def test_list_state_filter(db):
     t1 = add_task(db, "Ready task")
-    t2 = add_task(db, "Inbox task")
+    t2 = add_task(db, "Review task")
     run("update", t1, "--state", "ready", db_path=db)
     _, tasks = run("list", "--state", "ready", db_path=db)
     ids = [t["id"] for t in tasks]
@@ -147,19 +147,17 @@ def test_next_returns_empty_when_no_tasks(db):
     assert out.get("status") == "empty"
 
 
-def test_next_prefers_revision_queue_over_ready(db):
-    ready_id = add_task(db, "Ready task")
-    revision_id = add_task(db, "Revision task")
-    run("update", ready_id, "--state", "ready", db_path=db)
+def test_next_resume_mode_when_session_id_set(db):
+    task_id = add_task(db, "Resume task")
     conn = sqlite3.connect(db)
     conn.execute(
-        "UPDATE tasks SET state = 'revision_queue', session_id = 'sess-rev' WHERE id = ?",
-        (revision_id,),
+        "UPDATE tasks SET state = 'ready', session_id = 'sess-rev' WHERE id = ?",
+        (task_id,),
     )
     conn.commit()
     conn.close()
     _, out = run("next", db_path=db)
-    assert out["id"] == revision_id
+    assert out["id"] == task_id
     assert out["mode"] == "resume"
 
 
@@ -205,7 +203,7 @@ def test_followup_requires_session_id(db):
     assert "session_id" in str(out.get("error", ""))
 
 
-def test_followup_sets_revision_queue(db):
+def test_followup_sets_ready(db):
     task_id = add_task(db)
     conn = sqlite3.connect(db)
     conn.execute("UPDATE tasks SET state = 'awaiting_review', session_id = 'sess-abc' WHERE id = ?", (task_id,))
@@ -213,7 +211,7 @@ def test_followup_sets_revision_queue(db):
     conn.close()
     code, out = run("follow-up", task_id, "--prompt", "make it better", db_path=db)
     assert code == 0
-    assert out["state"] == "revision_queue"
+    assert out["state"] == "ready"
     assert out["session_id"] == "sess-abc"
 
 

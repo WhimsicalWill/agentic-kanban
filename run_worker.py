@@ -149,7 +149,7 @@ def queue_summary():
     needs_review = [t for t in all_tasks if t.get("state") == "awaiting_review"]
     in_progress = [t for t in all_tasks if t.get("state") == "in_progress"]
     watching = [t for t in all_tasks if t.get("state") == "watching"]
-    queued = [t for t in all_tasks if t.get("state") in ("ready", "revision_queue", "inbox")]
+    queued = [t for t in all_tasks if t.get("state") == "ready"]
 
     return {
         "time": time_str,
@@ -251,7 +251,7 @@ def format_whatsapp_report(processed, summary, errors, usage_line=None):
     if queued:
         lines.append("*Queued:*")
         for t in queued[:3]:
-            lines.append(f"· [{t['state']}] {t['title']}")
+            lines.append(f"· {t['title']}")
     else:
         lines.append("*Queued:* none")
 
