@@ -1,179 +1,128 @@
-# Spec: Watching State + Lightweight Poller
+# Spec: Watching State
 
 **GitHub issue:** #4
 
 ## Problem
 
-Some tasks don't end when Claude Code finishes — they begin a monitoring phase. The current state machine has no place for this:
+Some tasks don't end when Claude Code finishes — they begin a monitoring phase where the agent needs to periodically check in on a long-running external process (e.g. a training job, a deploy, a CI pipeline).
 
-- Keeping Claude Code running in `in_progress` is wasteful (burns usage limits, blocks 1 of 3 worker threads for hours)
-- Using the manual revision flow requires the user to trigger every check-in
-- Letting the task finish and re-queuing it on a timer loses session context and produces noisy WhatsApp reports
+The current state machine has no fit for this:
+- The task can't stay `in_progress` — once Claude Code exits, there's no mechanism to re-run it on a schedule
+- The manual revision flow requires the user to trigger every check-in
 
-**Concrete example:** the 05_09 experiment group. Claude Code launches 4 VastAI training jobs and exits. Those jobs run for 4–6 hours. During that time we want automated crash detection, VRAM monitoring, and escalation — without a human triggering each check.
+**Concrete example:** the 05_09 experiment group. Claude Code launches 4 VastAI training jobs and exits. Those jobs run for 4–6 hours. During that time we want automated crash detection and escalation — without a human triggering each check.
+
+---
 
 ## Proposed Solution
 
-A new `watching` task state and a separate lightweight poller (`watcher.py`) that runs on a schedule independently of the main Claude Code worker.
+A new `watching` task state. A watching task is picked up by the existing `run_worker.py` cron job on every tick (alongside `ready` and `revision_queue` tasks). Claude Code resumes the session, checks in on whatever it's monitoring, and either stays in `watching` or self-transitions to `revision_queue` or `awaiting_review` depending on what it finds.
 
-### Key design principles
-- The watcher is **not** Claude Code. It runs cheap, deterministic checks (SSH, API calls, DB reads). Claude Code is only invoked if the watcher decides human-level reasoning is needed.
-- The watcher is **stateless between ticks** — all state lives in the task's `watch_config` JSON column.
-- A watching task stays in `watching` indefinitely until the poller transitions it out.
+No separate poller process. No new cron job.
 
 ---
 
 ## State Machine Extension
 
-```
-inbox → ready → in_progress → awaiting_review → done
-                    ↑    ↓           ↓
-                    ←← revision_queue ←←
-                         ↓
-                      watching
-                         ↓ (poller)
-          ┌──────────────┼──────────────┐
-     watching        revision_queue  awaiting_review
-   (no action)      (Claude Code    (escalate to
-                      follow-up)       human)
-```
-
 New transitions:
 
 | From | To | Triggered by |
 |---|---|---|
-| `in_progress` | `watching` | Claude Code calls `tasks.py watch <id> --config '{...}'` |
-| `watching` | `watching` | Poller runs, no action required |
-| `watching` | `revision_queue` | Poller detects condition requiring Claude Code reasoning |
-| `watching` | `awaiting_review` | Poller detects terminal condition (crash, completion, escalation) |
+| `in_progress` | `watching` | Claude Code calls `tasks.py update <id> --state watching` before exiting |
+| `watching` | `watching` | run_worker.py default after each tick (Claude Code found nothing to act on) |
+| `watching` | `revision_queue` | Claude Code calls `tasks.py follow-up` before exiting |
+| `watching` | `awaiting_review` | Claude Code calls `tasks.py update <id> --state awaiting_review` before exiting |
+
+```
+in_progress → watching → watching → ... → awaiting_review
+                                  ↘ revision_queue
+```
+
+---
+
+## How Each Watch Tick Works
+
+1. `run_worker.py` picks up the `watching` task (same priority ordering as other states)
+2. Worker resumes the Claude Code session (`--resume <session_id>`) with the task description as the prompt
+3. Claude Code checks in on whatever it's monitoring (SSH, API call, file check, etc.)
+4. Claude Code decides the outcome using its own reasoning:
+   - **Nothing to act on:** exits without touching the task → worker keeps state `watching`, updates `output_summary` and `session_id`
+   - **Needs escalation:** calls `tasks.py update <id> --state awaiting_review --output-summary "..."` before exiting → worker detects the state changed and leaves it alone
+   - **Needs a follow-up Claude Code session:** calls `tasks.py follow-up <id> --prompt "..."` before exiting → worker detects `revision_queue` and leaves it alone
+
+run_worker.py re-reads the task state from the DB after Claude Code exits. If Claude Code already transitioned it, the worker skips its own update. If still `watching`, the worker refreshes `output_summary` and `session_id` and leaves state as `watching`.
 
 ---
 
 ## Example: VastAI Experiment Monitor
 
-### Current flow (broken)
-1. Claude Code launches experiments, reports status (Step 6), exits → `awaiting_review`
-2. User manually sends follow-up prompts to check in
-3. Each revision consumes a Claude Code session and a worker thread slot
+**Initial run (fresh task, state: `ready`):**
 
-### New flow
-1. Claude Code launches experiments, stores instance metadata, calls:
-   ```
-   python3 tasks.py watch task_5f912620 --config '{"check_type": "vastai_experiments", ...}'
-   ```
-2. Task transitions `in_progress` → `watching`. Claude Code exits. Worker thread is free.
-3. Every 5 minutes (separate cron), `watcher.py` picks up all `watching` tasks and runs their checks.
-4. For each VastAI instance the watcher SSH's in and checks:
-   - Is the tmux/screen session alive? (`tmux ls` or `pgrep -f train.py`)
-   - Current VRAM usage (`nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader`)
-   - Latest checkpoint epoch (check `outputs/` for newest `.pt` file mtime)
-5. Based on results:
-   - **All healthy** → update `watch_config.last_checked`, stay in `watching`
-   - **One instance crashed, restarts < max_restarts** → SSH in, re-run `vastctl.py train`, increment `restart_count`, stay in `watching`
-   - **One instance crashed, restarts exhausted** → move to `awaiting_review` with summary
-   - **All instances finished (epoch >= target)** → move to `awaiting_review` with final metrics
+Claude Code launches 4 VastAI experiments, reports the launch summary (Step 6), then calls:
+```
+python3 /home/opc/agentic-kanban/tasks.py update task_5f912620 \
+  --state watching \
+  --output-summary "4 experiments launched: J (36698475), J2 (36699539), J3 (36698478), K (36700053)"
+```
+
+Task moves to `watching`. Claude Code exits.
+
+**Each subsequent watch tick (state: `watching`, session resumed):**
+
+Claude Code SSHes into each instance and checks:
+- Is the training process still running?
+- Current VRAM / GPU utilization
+- Latest checkpoint epoch from `outputs/`
+
+If all healthy → exits without calling tasks.py. Worker keeps task in `watching`.
+
+If an instance has crashed → Claude Code calls:
+```
+python3 /home/opc/agentic-kanban/tasks.py update task_5f912620 \
+  --state awaiting_review \
+  --output-summary "Instance J (36698475) crashed at epoch 23. VRAM was 7.9GB/8GB. Logs: ..."
+```
+
+If all runs complete → Claude Code calls:
+```
+python3 /home/opc/agentic-kanban/tasks.py update task_5f912620 \
+  --state awaiting_review \
+  --output-summary "All experiments finished. Final metrics: ..."
+```
 
 ---
 
 ## Schema Changes
 
-### New column: `watch_config`
+### New `watching` state
 
-Add a `watch_config TEXT` column to the `tasks` table. Stored as JSON. Schema varies by `check_type`.
+Add `watching` to `VALID_STATES` in `tasks.py`. No other schema changes needed — `session_id` and `output_summary` already exist and are sufficient.
 
-**`vastai_experiments` example:**
-```json
-{
-  "check_type": "vastai_experiments",
-  "poll_interval_seconds": 300,
-  "last_checked_at": null,
-  "target_epochs": 50,
-  "auto_restart": true,
-  "max_restarts": 2,
-  "instances": [
-    {
-      "exp": "J",
-      "vastai_id": "36698475",
-      "ssh_host": "192.168.1.10",
-      "ssh_port": 22222,
-      "wandb_run": "eager-sound-189",
-      "restart_count": 0,
-      "last_status": "running"
-    }
-  ]
-}
-```
+### run_worker.py changes
 
-### New column: `next_poll_at`
-
-Add a `next_poll_at TEXT` column so the poller can skip tasks that aren't due yet without loading `watch_config`.
-
----
-
-## New CLI Command: `tasks.py watch`
-
-```
-python3 tasks.py watch <task_id> --config '<json>'
-```
-
-- Validates `task_id` is `in_progress`
-- Stores `watch_config` JSON to the new column
-- Sets `state = watching`, `next_poll_at = now + poll_interval_seconds`
-- Clears `claimed_by` / `claimed_at`
-- Logs a `state_change` event
-
----
-
-## New Component: `watcher.py`
-
-Runs on a separate schedule (e.g. every 5 minutes via system cron or a second OpenClaw job). Does **not** use Claude Code.
-
-```
-watcher.py
-  → tasks.py list --state watching
-  → for each task where next_poll_at <= now:
-      load watch_config
-      dispatch to check function by check_type
-      apply result action (stay / revision / review)
-      update next_poll_at
-```
-
-Check functions are pure Python — SSH calls, HTTP requests, file checks. No LLM involved.
-
-**Check function interface:**
+Add `watching` to the states the worker claims:
 ```python
-def check_vastai_experiments(task_id, config) -> WatchResult:
-    ...
-
-@dataclass
-class WatchResult:
-    action: Literal["stay", "revision", "review"]
-    updated_config: dict       # written back to watch_config
-    summary: str               # stored as output_summary if escalating
-    follow_up_prompt: str | None  # used if action == "revision"
+for candidate_state, candidate_mode in [
+    ("revision_queue", "resume"),
+    ("ready", "fresh"),
+    ("watching", "watch"),      # new
+]:
 ```
 
----
+In `process_one`, add a `watch` branch:
+- Resume session (`--resume session_id`) with the task description as prompt
+- After Claude Code exits, re-read the task state
+- If state is still `watching`: update `output_summary` and `session_id`, keep state `watching`
+- If state changed (Claude Code transitioned it): log and return — don't apply a second update
 
-## Poller Scheduling
+### WhatsApp report
 
-Two options:
-
-**Option A — Second OpenClaw cron job (5-min interval)**
-- Pros: consistent with existing infra, delivers results to WhatsApp
-- Cons: uses 2 more OpenRouter API calls per tick (one exec + one text turn)
-
-**Option B — System cron (`crontab -e`)**
-- Pros: zero API cost, runs even if OpenClaw is down
-- Cons: no WhatsApp delivery; output goes to system cron mail or a log file
-
-Recommendation: **Option B** for the polling work itself; promote to WhatsApp only when the poller transitions a task (i.e. write a small announce script that `run_worker.py` already handles via the normal report).
+Add a *Watching* section to the status report (between *In progress* and *Ready*), showing task title and latest `output_summary` preview.
 
 ---
 
-## Open Questions
+## What Claude Code Needs to Know
 
-1. **SSH key management** — the watcher needs SSH access to VastAI instances. Store key path in `watch_config`? Use a dedicated key at a fixed path (`~/.ssh/vastai_watcher`)?
-2. **Check type registry** — hard-code check types in `watcher.py`, or make them pluggable (e.g. each task stores a script path)?
-3. **Follow-up prompt content** — when the watcher queues a revision, what does it tell Claude Code? A templated message ("instance J crashed after epoch 34, restart_count=2, last VRAM: 7.9GB") or a full diagnostic dump?
-4. **Watching tasks in WhatsApp report** — should `run_worker.py` include a *Watching* section in the status report? Would add useful visibility but increase message length.
+When a task enters `watching`, the task description should already contain everything Claude Code needs for monitoring: what to check, how to connect, and what conditions trigger escalation. No separate config field is needed — the description doubles as the watch prompt.
+
+The agent is responsible for writing a description that is self-contained for repeated execution.
