@@ -25,10 +25,33 @@ You are a Claude Code agent executing a task from the agentic-kanban queue. Your
     --output-summary "what you found"
   ```
 
-- **Needs a follow-up session** — call `tasks.py follow-up` before exiting:
+- **Real work to do next** — call `tasks.py follow-up` before exiting:
   ```
   python3 /home/opc/agentic-kanban/tasks.py follow-up <TASK_ID> \
     --prompt "instructions for the next session"
   ```
+  Use this when the monitoring phase is done and the next step is substantial work
+  (analysis, reporting, cleanup) that deserves its own focused session. Don't use it
+  just to continue work you could do right now in the current session.
 
 Replace `<TASK_ID>` with the task ID from the top of your prompt.
+
+## Creating new tasks
+
+You can create new tasks at any time — for example, to scope out parallel work or
+hand off something discovered during execution.
+
+```
+# Needs human review before running (default for agent-created tasks):
+python3 /home/opc/agentic-kanban/tasks.py add "Task title" \
+  --description "Details" \
+  --state awaiting_review
+
+# Trivial / safe to run immediately without human review:
+python3 /home/opc/agentic-kanban/tasks.py add "Task title" \
+  --description "Details" \
+  --state ready
+```
+
+Use `awaiting_review` when the task needs human approval before it runs.
+Use `ready` only when you are confident the task is safe to execute autonomously.

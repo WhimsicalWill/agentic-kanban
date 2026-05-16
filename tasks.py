@@ -60,20 +60,21 @@ def fmt_task(row):
 def cmd_add(args):
     task_id = f"task_{uuid.uuid4().hex[:8]}"
     tags = json.dumps(args.tags or [])
+    state = args.state or "inbox"
     ts = now()
     with db() as conn:
         conn.execute(
             """INSERT INTO tasks (id, title, description, state, tags, priority,
                created_at, state_changed_at, executor)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (task_id, args.title, args.description or "", "inbox", tags,
+            (task_id, args.title, args.description or "", state, tags,
              args.priority, ts, ts, "claude-code")
         )
         conn.execute(
             "INSERT INTO events (task_id, event_type, to_state, created_at) VALUES (?, ?, ?, ?)",
-            (task_id, "created", "inbox", ts)
+            (task_id, "created", state, ts)
         )
-    print(json.dumps({"id": task_id, "state": "inbox"}))
+    print(json.dumps({"id": task_id, "state": state}))
 
 
 def cmd_list(args):
@@ -294,11 +295,13 @@ def main():
     parser = argparse.ArgumentParser(description="Task store CLI")
     sub = parser.add_subparsers(dest="cmd")
 
-    p_add = sub.add_parser("add", help="Add a task to inbox")
+    p_add = sub.add_parser("add", help="Add a task")
     p_add.add_argument("title")
     p_add.add_argument("--description", "-d")
     p_add.add_argument("--tags", nargs="*")
     p_add.add_argument("--priority", type=int, default=5)
+    p_add.add_argument("--state", "-s", choices=["inbox", "ready", "awaiting_review"],
+                       default="inbox")
 
     p_list = sub.add_parser("list", help="List tasks")
     p_list.add_argument("--state", "-s")

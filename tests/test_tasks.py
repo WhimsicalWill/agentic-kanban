@@ -77,6 +77,16 @@ def test_add_with_tags_and_priority(db):
     assert out["priority"] == 2
 
 
+def test_add_with_explicit_state(db):
+    code, out = run("add", "Ready task", "--state", "ready", db_path=db)
+    assert code == 0
+    assert out["state"] == "ready"
+
+    code, out = run("add", "Review task", "--state", "awaiting_review", db_path=db)
+    assert code == 0
+    assert out["state"] == "awaiting_review"
+
+
 # ── list ──────────────────────────────────────────────────────────────────────
 
 def test_list_excludes_done_and_cancelled(db):
