@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.9
 """Task worker — claims the next task and executes it via Claude Code."""
 
 import json
@@ -109,6 +109,11 @@ def process_one(run_id):
         tasks_cmd(*update_args)
         print(f"→ watching [{'ERROR' if is_error else 'OK'}]", file=sys.stderr)
     else:
+        # Check if Claude Code already self-transitioned (e.g. to watching).
+        current = tasks_cmd("get", task_id)
+        if current.get("state") != "in_progress":
+            print(f"→ {current.get('state')} [self-transitioned]", file=sys.stderr)
+            return True
         update_args = ["update", task_id, "--state", "awaiting_review", "--output-summary", output]
         if new_session_id:
             update_args += ["--session-id", new_session_id]

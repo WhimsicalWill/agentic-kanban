@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.9
 """Task store CLI — manages the SQLite task queue."""
 
 import argparse
@@ -118,7 +118,7 @@ def cmd_update(args):
         if args.claimed_by:
             updates["claimed_by"] = args.claimed_by
             updates["claimed_at"] = ts
-        if new_state in ("done", "cancelled", "awaiting_review"):
+        if new_state in ("done", "cancelled", "awaiting_review", "watching", "ready"):
             updates["claimed_by"] = None
             updates["claimed_at"] = None
         if args.output_summary:
