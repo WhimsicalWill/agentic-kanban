@@ -105,8 +105,3 @@ Any state → cancelled  (manual)
 
 **Known OpenClaw behavior:** a 429 from one model may put the entire OpenRouter provider into cooldown, blocking all fallbacks for that tick. Mitigation: keep API calls per cron tick minimal (currently 2).
 
-## Known Gaps / TODO
-1. Worker doesn't re-check task state mid-execution (external cancellations can be overwritten)
-2. No automatic retry on Claude Code crash — requires manual state reset to `ready`
-3. No UI for mid-task human input beyond the WhatsApp follow-up flow
-4. Long-running / event-driven tasks need a `watching` state and lightweight poller
