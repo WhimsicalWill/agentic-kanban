@@ -23,7 +23,7 @@ def db():
 
 
 def now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def fmt_task(row):
@@ -194,7 +194,7 @@ def cmd_next(args):
             row = conn.execute(
                 """SELECT * FROM tasks
                    WHERE state = ?
-                   AND (claimed_by IS NULL OR claimed_at < datetime('now', '-30 minutes'))
+                   AND (claimed_by IS NULL OR datetime(claimed_at) < datetime('now', '-30 minutes'))
                    AND tags NOT LIKE '%needs_human%'
                    ORDER BY priority ASC, state_changed_at ASC
                    LIMIT 1""",
