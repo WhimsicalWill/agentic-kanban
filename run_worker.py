@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.9
 """Task worker — claims the next task and executes it via Claude Code."""
 
 import json
@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 TASKS_CLI = "/home/opc/agentic-kanban/tasks.py"
 WORKER_ID = f"worker-{os.getpid()}"
 WORK_DIR = "/home/opc/agentic-kanban"
-MAX_PARALLEL_WORKERS = 3
+MAX_PARALLEL_WORKERS = 1
 
 
 def tasks_cmd(*args):
@@ -45,7 +45,7 @@ def run_claude(prompt, session_id=None):
     try:
         return json.loads(stdout)
     except json.JSONDecodeError:
-        return {"is_error": True, "result": stdout[:800], "session_id": None}
+        return {"is_error": True, "result": stdout, "session_id": None}
 
 
 def build_prompt(task_id, mode, task):
@@ -56,12 +56,15 @@ def build_prompt(task_id, mode, task):
     return f"{header}\n{body}"
 
 
-def process_one(run_id):
-    """Claim and execute one task. Returns True if a task was processed, False if queue empty."""
-    task = tasks_cmd("next", "--run-id", run_id)
+def process_one(run_id, exclude=()):
+    """Claim and execute one task. Returns task_id if processed, None if queue empty."""
+    next_args = ["next", "--run-id", run_id]
+    if exclude:
+        next_args += ["--exclude"] + list(exclude)
+    task = tasks_cmd(*next_args)
 
     if task.get("status") == "empty":
-        return False
+        return None
 
     task_id = task["id"]
     mode = task.get("mode", "fresh")
@@ -77,7 +80,7 @@ def process_one(run_id):
                       "--state", "awaiting_review",
                       "--note", "Cannot resume: no session_id stored")
             print(f"ERROR: {task_id} has no session_id — moved to awaiting_review", file=sys.stderr)
-            return True
+            return task_id
 
         result = run_claude(build_prompt(task_id, mode, task), session_id=session_id)
 
@@ -88,30 +91,34 @@ def process_one(run_id):
                       "--state", "awaiting_review",
                       "--note", "Cannot watch: no session_id stored")
             print(f"ERROR: {task_id} has no session_id — moved to awaiting_review", file=sys.stderr)
-            return True
+            return task_id
 
         result = run_claude(build_prompt(task_id, mode, task), session_id=session_id)
 
-    output = (result.get("result") or "")[:800]
+    output = result.get("result") or ""
     new_session_id = result.get("session_id")
     is_error = result.get("is_error", False)
 
+    # Re-read state — Claude may have self-transitioned while running.
+    current = tasks_cmd("get", task_id)
+    current_state = current.get("state", "in_progress")
+    self_transitioned = current_state != "in_progress"
+
+    # Always persist session_id — Claude cannot know its own session_id during
+    # execution, so the worker is responsible for saving it after the session ends.
+    if new_session_id:
+        tasks_cmd("update", task_id, "--state", current_state, "--session-id", new_session_id)
+
+    if self_transitioned:
+        print(f"→ {current_state} [self-transitioned]", file=sys.stderr)
+        return task_id
+
     if mode == "watch":
-        # Check if Claude Code already self-transitioned the task.
-        current = tasks_cmd("get", task_id)
-        if current.get("state") != "in_progress":
-            print(f"→ {current.get('state')} [self-transitioned]", file=sys.stderr)
-            return True
         # No self-transition: default back to watching.
-        update_args = ["update", task_id, "--state", "watching", "--output-summary", output]
-        if new_session_id:
-            update_args += ["--session-id", new_session_id]
-        tasks_cmd(*update_args)
+        tasks_cmd("update", task_id, "--state", "watching", "--output-summary", output)
         print(f"→ watching [{'ERROR' if is_error else 'OK'}]", file=sys.stderr)
     else:
         update_args = ["update", task_id, "--state", "awaiting_review", "--output-summary", output]
-        if new_session_id:
-            update_args += ["--session-id", new_session_id]
         if is_error:
             update_args += ["--note", "claude returned is_error=true"]
         tasks_cmd(*update_args)
@@ -121,7 +128,7 @@ def process_one(run_id):
     if output:
         print(f"Preview: {output[:200]}", file=sys.stderr)
 
-    return True
+    return task_id
 
 
 def queue_summary():
@@ -232,7 +239,7 @@ def format_whatsapp_report(processed, summary, errors, usage_line=None):
     if needs_review:
         lines.append("*Needs your review:*")
         for t in needs_review[:3]:
-            summary_preview = (t.get("output_summary") or "")[:60]
+            summary_preview = t.get("output_summary") or ""
             lines.append(f"· [{t['id']}] {t['title']}: {summary_preview}")
     else:
         lines.append("*Needs your review:* none")
@@ -245,7 +252,7 @@ def format_whatsapp_report(processed, summary, errors, usage_line=None):
     if watching:
         lines.append("*Watching:*")
         for t in watching[:3]:
-            summary_preview = (t.get("output_summary") or "")[:60]
+            summary_preview = t.get("output_summary") or ""
             lines.append(f"· {t['title']}: {summary_preview}")
 
     if queued:
@@ -268,15 +275,17 @@ def run_worker_thread(thread_idx):
     """Drain the task queue from one thread. Returns (processed_count, errors)."""
     processed = 0
     errors = []
+    seen = set()
     while True:
         run_id = f"{WORKER_ID}-t{thread_idx}-{processed}"
         try:
-            did_work = process_one(run_id)
+            task_id = process_one(run_id, exclude=seen)
         except Exception as e:
             errors.append(str(e)[:80])
             break
-        if not did_work:
+        if not task_id:
             break
+        seen.add(task_id)
         processed += 1
     return processed, errors
 
