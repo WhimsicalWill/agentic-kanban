@@ -187,20 +187,21 @@ def cmd_follow_up(args):
 def cmd_next(args):
     """Claim the next actionable task. watching takes priority over ready."""
     run_id = args.run_id or f"run_{uuid.uuid4().hex[:8]}"
+    exclude = set(args.exclude or [])
     ts = now()
     with db() as conn:
         row = None
         mode = None
         for candidate_state in ["watching", "ready"]:
-            row = conn.execute(
-                """SELECT * FROM tasks
+            exclude_clause = f"AND id NOT IN ({','.join('?' * len(exclude))})" if exclude else ""
+            query = f"""SELECT * FROM tasks
                    WHERE state = ?
                    AND (claimed_by IS NULL OR datetime(claimed_at) < datetime('now', '-30 minutes'))
                    AND tags NOT LIKE '%needs_human%'
+                   {exclude_clause}
                    ORDER BY priority ASC, state_changed_at ASC
-                   LIMIT 1""",
-                (candidate_state,)
-            ).fetchone()
+                   LIMIT 1"""
+            row = conn.execute(query, (candidate_state, *exclude)).fetchone()
             if row:
                 if candidate_state == "watching":
                     mode = "watch"
@@ -322,6 +323,8 @@ def main():
 
     p_next = sub.add_parser("next", help="Claim next ready task")
     p_next.add_argument("--run-id")
+    p_next.add_argument("--exclude", nargs="*", default=[], metavar="TASK_ID",
+                        help="Task IDs to skip (already processed this run)")
 
     sub.add_parser("needs-review", help="Show tasks awaiting your attention")
     sub.add_parser("init", help="Create DB schema (safe to re-run)")
