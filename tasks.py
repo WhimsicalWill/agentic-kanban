@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.9
 """Task store CLI — manages the SQLite task queue."""
 
 import sys
@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT
 );
 """
-VALID_STATES = ["inbox", "scoping", "ready", "in_progress", "awaiting_review",
-                "awaiting_client", "revision_queue", "watching", "done", "cancelled"]
+VALID_STATES = ["inbox", "ready", "in_progress", "awaiting_review",
+                "watching", "done", "cancelled"]
 
 
 def db():
@@ -161,7 +161,7 @@ def cmd_follow_up(args):
             sys.exit(1)
 
         updates = {
-            "state": "revision_queue",
+            "state": "ready",
             "state_changed_at": ts,
             "description": args.prompt,
             "session_id": session_id,
@@ -174,28 +174,24 @@ def cmd_follow_up(args):
         conn.execute(
             "INSERT INTO events (task_id, event_type, from_state, to_state, note, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, "follow-up", task["state"], "revision_queue", args.prompt, ts)
+            (task_id, "follow-up", task["state"], "ready", args.prompt, ts)
         )
 
     print(json.dumps({
         "id": task_id,
-        "state": "revision_queue",
+        "state": "ready",
         "session_id": session_id,
     }))
 
 
 def cmd_next(args):
-    """Claim the next actionable task. revision_queue/watching (resume) takes priority over ready (fresh)."""
+    """Claim the next actionable task. watching takes priority over ready."""
     run_id = args.run_id or f"run_{uuid.uuid4().hex[:8]}"
     ts = now()
     with db() as conn:
         row = None
         mode = None
-        for candidate_state, candidate_mode in [
-            ("revision_queue", "resume"),
-            ("watching", "watch"),
-            ("ready", "fresh"),
-        ]:
+        for candidate_state in ["watching", "ready"]:
             row = conn.execute(
                 """SELECT * FROM tasks
                    WHERE state = ?
@@ -206,7 +202,10 @@ def cmd_next(args):
                 (candidate_state,)
             ).fetchone()
             if row:
-                mode = candidate_mode
+                if candidate_state == "watching":
+                    mode = "watch"
+                else:
+                    mode = "resume" if row["session_id"] else "fresh"
                 break
 
         if not row:
