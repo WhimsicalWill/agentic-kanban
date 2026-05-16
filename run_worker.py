@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Task worker — claims the next task and executes it via Claude Code."""
 
-import sys
 import json
-import subprocess
 import os
+import subprocess
+import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -17,7 +17,7 @@ MAX_PARALLEL_WORKERS = 3
 def tasks_cmd(*args):
     result = subprocess.run(
         [sys.executable, TASKS_CLI] + list(args),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
+        capture_output=True, text=True,
     )
     if not result.stdout.strip():
         return {}
@@ -34,8 +34,7 @@ def run_claude(prompt, session_id=None):
         cmd += ["--resume", session_id]
 
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              universal_newlines=True, cwd=WORK_DIR, timeout=1800)
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=WORK_DIR, timeout=1800)
     except subprocess.TimeoutExpired:
         return {"is_error": True, "result": "claude timed out after 30 minutes", "session_id": None}
 
@@ -122,8 +121,8 @@ def process_one(run_id):
 
 def queue_summary():
     """Return a compact status string for the WhatsApp report."""
-    from datetime import datetime, timezone, timedelta
     import time as _time
+    from datetime import datetime, timedelta, timezone
     utc_now = datetime.now(timezone.utc)
     # DST: second Sunday in March through first Sunday in November
     year = utc_now.year

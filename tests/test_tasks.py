@@ -16,7 +16,7 @@ def make_db(path: str) -> None:
     """Create the tasks + events schema via tasks.py init (single source of truth)."""
     result = subprocess.run(
         [sys.executable, str(TASKS_PY), "init"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+        capture_output=True, text=True,
         env={**__import__("os").environ, "DB_PATH_OVERRIDE": path},
     )
     assert result.returncode == 0, result.stderr
@@ -27,9 +27,7 @@ def run(*args, db_path: str):
     env_patch = {"DB_PATH_OVERRIDE": db_path}
     result = subprocess.run(
         [sys.executable, str(TASKS_PY)] + list(args),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
+        capture_output=True, text=True,
         env={**__import__("os").environ, **env_patch},
     )
     stdout = result.stdout.strip()
