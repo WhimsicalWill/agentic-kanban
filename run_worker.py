@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 TASKS_CLI = "/home/opc/agentic-kanban/tasks.py"
 WORKER_ID = f"worker-{os.getpid()}"
-WORK_DIR = "/home/opc"
+WORK_DIR = "/home/opc/agentic-kanban"
 MAX_PARALLEL_WORKERS = 3
 
 
@@ -48,6 +48,17 @@ def run_claude(prompt, session_id=None):
         return {"is_error": True, "result": stdout[:800], "session_id": None}
 
 
+def build_prompt(task_id, mode, task):
+    header = f"Task ID: {task_id}\nMode: {mode}\n---"
+    if mode == "fresh":
+        body = task["title"]
+        if task.get("description"):
+            body += f"\n\n{task['description']}"
+    else:
+        body = task.get("description", "")
+    return f"{header}\n{body}"
+
+
 def process_one(run_id):
     """Claim and execute one task. Returns True if a task was processed, False if queue empty."""
     task = tasks_cmd("next", "--run-id", run_id)
@@ -60,10 +71,7 @@ def process_one(run_id):
     print(f"[{mode.upper()}] {task_id}: {task['title']}", file=sys.stderr)
 
     if mode == "fresh":
-        prompt = task["title"]
-        if task.get("description"):
-            prompt += f"\n\n{task['description']}"
-        result = run_claude(prompt)
+        result = run_claude(build_prompt(task_id, mode, task))
 
     elif mode == "resume":
         session_id = task.get("session_id")
@@ -74,7 +82,7 @@ def process_one(run_id):
             print(f"ERROR: {task_id} has no session_id — moved to awaiting_review", file=sys.stderr)
             return True
 
-        result = run_claude(task.get("description", ""), session_id=session_id)
+        result = run_claude(build_prompt(task_id, mode, task), session_id=session_id)
 
     else:  # watch
         session_id = task.get("session_id")
@@ -85,7 +93,7 @@ def process_one(run_id):
             print(f"ERROR: {task_id} has no session_id — moved to awaiting_review", file=sys.stderr)
             return True
 
-        result = run_claude(task.get("description", ""), session_id=session_id)
+        result = run_claude(build_prompt(task_id, mode, task), session_id=session_id)
 
     output = (result.get("result") or "")[:800]
     new_session_id = result.get("session_id")
