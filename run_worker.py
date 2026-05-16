@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.9
 """Task worker — claims the next task and executes it via Claude Code."""
 
 import sys
@@ -145,7 +145,7 @@ def queue_summary():
     needs_review = [t for t in all_tasks if t.get("state") == "awaiting_review"]
     in_progress = [t for t in all_tasks if t.get("state") == "in_progress"]
     watching = [t for t in all_tasks if t.get("state") == "watching"]
-    queued = [t for t in all_tasks if t.get("state") in ("ready", "revision_queue", "inbox")]
+    queued = [t for t in all_tasks if t.get("state") in ("ready", "inbox")]
 
     return {
         "time": time_str,
