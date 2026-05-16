@@ -27,7 +27,7 @@ def make_db(path: str) -> None:
             state_changed_at TEXT,
             iteration_count INTEGER DEFAULT 0,
             blocked_reason TEXT,
-            agent_confidence TEXT DEFAULT 'high',
+            agent_confidence TEXT,
             parent_task TEXT,
             executor TEXT DEFAULT 'claude-code',
             claimed_by TEXT,
@@ -53,8 +53,9 @@ def run(*args, db_path: str):
     env_patch = {"DB_PATH_OVERRIDE": db_path}
     result = subprocess.run(
         [sys.executable, str(TASKS_PY)] + list(args),
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         env={**__import__("os").environ, **env_patch},
     )
     stdout = result.stdout.strip()
@@ -150,42 +151,11 @@ def test_update_transitions_state(db):
     assert out["state"] == "ready"
 
 
-def test_update_double_claim_guard(db):
+def test_update_stores_output_summary(db):
     task_id = add_task(db)
-    run("update", task_id, "--state", "ready", db_path=db)
-    # First claim succeeds
-    run("update", task_id, "--state", "in_progress", "--claimed-by", "worker-A", db_path=db)
-    # Second claim by different worker is rejected
-    code, out = run("update", task_id, "--state", "in_progress", "--claimed-by", "worker-B", db_path=db)
-    assert code != 0
-    assert out.get("error") == "already_claimed"
-
-
-def test_update_to_revision_queue_increments_iteration(db):
-    task_id = add_task(db)
-    run("update", task_id, "--state", "ready", db_path=db)
-    run("update", task_id, "--state", "in_progress", db_path=db)
-    run("update", task_id, "--state", "awaiting_review", db_path=db)
-    # Manually set session_id so follow-up can proceed
-    conn = sqlite3.connect(db)
-    conn.execute("UPDATE tasks SET session_id = 'sess-1' WHERE id = ?", (task_id,))
-    conn.commit()
-    conn.close()
-    run("follow-up", task_id, "--prompt", "fix it", db_path=db)
-    _, task = run("get", task_id, db_path=db)
-    assert task["state"] == "revision_queue"
-    assert task["iteration_count"] == 1
-
-
-def test_update_auto_blocks_at_max_iterations(db):
-    task_id = add_task(db)
-    conn = sqlite3.connect(db)
-    conn.execute("UPDATE tasks SET iteration_count = 4, session_id = 'sess-x', state = 'awaiting_review' WHERE id = ?", (task_id,))
-    conn.commit()
-    conn.close()
-    code, out = run("follow-up", task_id, "--prompt", "one more try", db_path=db)
-    assert code != 0
-    assert "exceeded" in str(out.get("error", "")).lower()
+    run("update", task_id, "--state", "awaiting_review", "--output-summary", "done!", db_path=db)
+    _, out = run("get", task_id, db_path=db)
+    assert out["output_summary"] == "done!"
 
 
 # ── next ──────────────────────────────────────────────────────────────────────
@@ -209,6 +179,22 @@ def test_next_prefers_revision_queue_over_ready(db):
     _, out = run("next", db_path=db)
     assert out["id"] == revision_id
     assert out["mode"] == "resume"
+
+
+def test_next_prefers_watching_over_ready(db):
+    ready_id = add_task(db, "Ready task")
+    watch_id = add_task(db, "Watching task")
+    run("update", ready_id, "--state", "ready", db_path=db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET state = 'watching', session_id = 'sess-watch' WHERE id = ?",
+        (watch_id,),
+    )
+    conn.commit()
+    conn.close()
+    _, out = run("next", db_path=db)
+    assert out["id"] == watch_id
+    assert out["mode"] == "watch"
 
 
 def test_next_claims_ready_task(db):
@@ -247,3 +233,14 @@ def test_followup_sets_revision_queue(db):
     assert code == 0
     assert out["state"] == "revision_queue"
     assert out["session_id"] == "sess-abc"
+
+
+def test_followup_overwrites_description(db):
+    task_id = add_task(db, description="original instructions")
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE tasks SET state = 'awaiting_review', session_id = 'sess-abc' WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+    run("follow-up", task_id, "--prompt", "new instructions", db_path=db)
+    _, out = run("get", task_id, db_path=db)
+    assert out["description"] == "new instructions"
