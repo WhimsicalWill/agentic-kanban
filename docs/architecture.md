@@ -84,6 +84,20 @@ Any state → cancelled  (manual)
 
 **Stale lock protection:** if `in_progress` with `claimed_at` older than 30 minutes, the next worker run reclaims it.
 
+## Dev / Prod Isolation
+
+Both prod and dev live on the same Oracle ARM instance, in separate directories:
+
+```
+~/agentic-kanban/        ← prod clone (always on main); cron job runs from here
+~/agentic-kanban-dev/    ← dev working tree; any branch, safe to break
+```
+
+The cron job config hardcodes `~/agentic-kanban/run_worker.py` and never changes.
+To deploy a change: `git -C ~/agentic-kanban pull` (run manually after merging to main).
+
+This means the feature branch checked out in `~/agentic-kanban-dev/` never affects the live cron job.
+
 ## Cost Model
 
 | Layer | Model | Cost |
