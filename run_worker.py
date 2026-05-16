@@ -50,12 +50,9 @@ def run_claude(prompt, session_id=None):
 
 def build_prompt(task_id, mode, task):
     header = f"Task ID: {task_id}\nMode: {mode}\n---"
-    if mode == "fresh":
-        body = task["title"]
-        if task.get("description"):
-            body += f"\n\n{task['description']}"
-    else:
-        body = task.get("description", "")
+    body = task["title"]
+    if task.get("description"):
+        body += f"\n\n{task['description']}"
     return f"{header}\n{body}"
 
 
