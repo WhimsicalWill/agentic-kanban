@@ -3,12 +3,13 @@
 
 import sys
 import json
+import os
 import sqlite3
 import uuid
 import argparse
 from datetime import datetime, timezone
 
-DB_PATH = "/home/opc/task-store/tasks.db"
+DB_PATH = os.environ.get("DB_PATH_OVERRIDE", "/home/opc/task-store/tasks.db")
 VALID_STATES = ["inbox", "scoping", "ready", "in_progress", "awaiting_review",
                 "awaiting_client", "revision_queue", "done", "blocked", "cancelled"]
 FOLLOW_UP_STATES = ["awaiting_review", "revision_queue"]  # states that can receive follow-ups

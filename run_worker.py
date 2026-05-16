@@ -5,14 +5,12 @@ import sys
 import json
 import subprocess
 import os
-import hashlib
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 TASKS_CLI = "/home/opc/task-store/tasks.py"
 WORKER_ID = f"worker-{os.getpid()}"
 WORK_DIR = "/home/opc"
-STATE_HASH_FILE = "/home/opc/task-store/last_state_hash.txt"
 MAX_PARALLEL_WORKERS = 3
 
 
@@ -244,25 +242,6 @@ def format_whatsapp_report(processed, summary, errors, usage_line=None):
     return "\n".join(lines)
 
 
-def compute_state_hash(all_tasks):
-    # Include state_changed_at so any task update (even same-state) changes the hash
-    pairs = sorted((t["id"], t["state"], t.get("state_changed_at", "")) for t in all_tasks)
-    return hashlib.md5(json.dumps(pairs).encode()).hexdigest()
-
-
-def load_last_hash():
-    try:
-        with open(STATE_HASH_FILE) as f:
-            return f.read().strip()
-    except (IOError, OSError):
-        return None
-
-
-def save_hash(h):
-    with open(STATE_HASH_FILE, "w") as f:
-        f.write(h)
-
-
 def run_worker_thread(thread_idx):
     """Drain the task queue from one thread. Returns (processed_count, errors)."""
     processed = 0
@@ -290,18 +269,6 @@ def main():
             p, e = future.result()
             processed += p
             errors.extend(e)
-
-    all_tasks = tasks_cmd("list")
-    if not isinstance(all_tasks, list):
-        all_tasks = []
-
-    current_hash = compute_state_hash(all_tasks)
-    last_hash = load_last_hash()
-
-    if processed == 0 and not errors and current_hash == last_hash:
-        return 0  # nothing changed — suppress WhatsApp output
-
-    save_hash(current_hash)
 
     summary = queue_summary()
     usage_line = fetch_usage_stats()
