@@ -8,7 +8,7 @@ import os
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-TASKS_CLI = "/home/opc/task-store/tasks.py"
+TASKS_CLI = "/home/opc/agentic-kanban/tasks.py"
 WORKER_ID = f"worker-{os.getpid()}"
 WORK_DIR = "/home/opc"
 MAX_PARALLEL_WORKERS = 3

@@ -1,7 +1,5 @@
 # Task Queue Architecture
 
-**Last updated:** 2026-05-16
-
 ## Goal
 
 OpenClaw as orchestrator managing Claude Code for task execution. You assign work via WhatsApp → OpenClaw queues tasks → worker executes via Claude Code → you review.
@@ -11,11 +9,11 @@ OpenClaw as orchestrator managing Claude Code for task execution. You assign wor
 ```
 You (WhatsApp)
     ↓
-OpenClaw main session (Llama 3.3 70B free via OpenRouter)
+OpenClaw main session (gpt-oss-120b free via OpenRouter, +3 fallbacks)
     ↓ reads AGENTS.md, runs tasks.py CLI
-Task Store (SQLite — /home/opc/task-store/tasks.db)
+Task Store (SQLite — /home/opc/agentic-kanban/tasks.db)
     ↑
-OpenClaw cron job — every 10 min (Llama 3.3 70B free)
+OpenClaw cron job — every 10 min (gpt-oss-120b free, +3 fallbacks)
     │  makes 2 API calls per tick:
     │  1. exec → runs run_worker.py
     │  2. final text turn → passes output through unchanged
@@ -30,8 +28,8 @@ Task store updated → WhatsApp report delivered via cron announce
 ## Components
 
 ### 1. SQLite Task Store
-- **File:** `/home/opc/task-store/tasks.db`
-- **CLI:** `/home/opc/task-store/tasks.py`
+- **File:** `/home/opc/agentic-kanban/tasks.db`
+- **CLI:** `/home/opc/agentic-kanban/tasks.py`
 - **Tables:**
   - `tasks` — id, title, description, state, tags, priority, executor, output_summary, session_id, etc.
   - `events` — audit log of all state changes and follow-up prompts
@@ -42,12 +40,16 @@ Task store updated → WhatsApp report delivered via cron announce
 - **Name:** `task-worker-claude-code`
 - **Schedule:** Every 10 minutes
 - **Session target:** Isolated (no shared state between ticks)
-- **Model:** `openrouter/meta-llama/llama-3.3-70b-instruct:free`
-  - Fallbacks: `deepseek/deepseek-r1:free` → `google/gemma-3-27b-it:free`
+- **Model chain:**
+  1. `openai/gpt-oss-120b:free` — primary (confirmed working)
+  2. `minimax/minimax-m2.5:free` — confirmed working
+  3. `meta-llama/llama-3.3-70b-instruct:free` — works when not rate-limited
+  4. `nvidia/nemotron-3-super-120b-a12b:free` — last free resort
+  5. `deepseek/deepseek-v4-flash` — paid safety net
 - **Delivery:** `announce` to WhatsApp — sends final text output directly
 
 ### 3. Python Worker (`run_worker.py`)
-- **File:** `/home/opc/task-store/run_worker.py`
+- **File:** `/home/opc/agentic-kanban/run_worker.py`
 - Spawns up to 3 parallel threads, each draining the queue via `tasks.py next`
 - CAS guard in `tasks.py next` prevents double-claiming across threads
 - Handles both fresh tasks (first run) and revision tasks (`--resume <session_id>`)
@@ -86,30 +88,22 @@ Any state → cancelled  (manual)
 
 | Layer | Model | Cost |
 |---|---|---|
-| Main agent (OpenClaw session) | Llama 3.3 70B free via OpenRouter | $0/token |
-| Cron polling (10-min interval) | Llama 3.3 70B free via OpenRouter | $0/token — 144 calls/day |
+| Main agent (OpenClaw session) | gpt-oss-120b:free (OpenRouter) | $0/token |
+| Cron polling (10-min interval, 144 calls/day) | gpt-oss-120b:free (OpenRouter) | $0/token |
 | Task execution | Claude Code (`claude -p`) | Anthropic Pro subscription |
+| Fallback safety net | deepseek/deepseek-v4-flash | ~$0.14/M input, $0.28/M output |
 
-**OpenRouter free tier:** by default limited to 50 req/day. Adding $10 to the OpenRouter account (balance never depletes on free models) unlocks 1,000 req/day — enough for the 10-min cron plus main-session usage.
+**OpenRouter free tier:** requires a $10 balance to unlock 1,000 req/day (up from the default 50). The balance is not consumed by free-model calls — it just gates rate limits.
 
-**Known OpenClaw bug:** a 429 from one model puts the entire OpenRouter provider into cooldown, blocking all fallbacks. Mitigation: keep API calls per cron tick minimal (currently 2).
+**Working free models (as of 2026-05-16):**
+- `openai/gpt-oss-120b:free` — primary, confirmed working
+- `minimax/minimax-m2.5:free` — confirmed working
+- `meta-llama/llama-3.3-70b-instruct:free` — works when not rate-limited (429 common)
+- `nvidia/nemotron-3-super-120b-a12b:free` — last free resort
 
-## Changelog
+**Dead/removed free models:** `deepseek-r1:free`, `gemma-3-27b-it:free`, `gemini-flash-1.5-8b:free` — all return 402/404.
 
-### 2026-05-16 — Repo renamed to agentic-kanban; docs reorganized
-- Moved architecture doc to `docs/specs/`
-- Corrected cost model: orchestration layer uses free OpenRouter models ($0/token)
-- Removed hash-based WhatsApp silencing from run_worker.py
-- Removed unused worker.sh (superseded by run_worker.py)
-- Added pyproject.toml with Ruff linter config
-- Added unit tests for tasks.py CLI
-
-### 2026-05-09 — Initial architecture + feedback-driven improvements
-- `session_id` column added to tasks table; stored after first Claude Code run
-- Worker uses `--resume <session_id>` for revision tasks
-- Cron job switched to free OpenRouter model with fallbacks
-- Python parallel worker (`run_worker.py`) replaces bash worker
-- Voice transcription support (Google free Speech API)
+**Known OpenClaw behavior:** a 429 from one model may put the entire OpenRouter provider into cooldown, blocking all fallbacks for that tick. Mitigation: keep API calls per cron tick minimal (currently 2).
 
 ## Known Gaps / TODO
 1. Worker doesn't re-check task state mid-execution (external cancellations can be overwritten)
