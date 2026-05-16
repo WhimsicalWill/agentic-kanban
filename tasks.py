@@ -10,10 +10,35 @@ import argparse
 from datetime import datetime, timezone
 
 DB_PATH = os.environ.get("DB_PATH_OVERRIDE", "/home/opc/agentic-kanban/tasks.db")
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'inbox',
+    tags TEXT DEFAULT '[]',
+    priority INTEGER DEFAULT 5,
+    created_at TEXT,
+    state_changed_at TEXT,
+    executor TEXT DEFAULT 'claude-code',
+    claimed_by TEXT,
+    claimed_at TEXT,
+    output_summary TEXT,
+    session_id TEXT
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT,
+    note TEXT,
+    created_at TEXT
+);
+"""
 VALID_STATES = ["inbox", "scoping", "ready", "in_progress", "awaiting_review",
-                "awaiting_client", "revision_queue", "done", "blocked", "cancelled"]
-FOLLOW_UP_STATES = ["awaiting_review", "revision_queue"]  # states that can receive follow-ups
-MAX_ITERATIONS = 5
+                "awaiting_client", "revision_queue", "watching", "done", "cancelled"]
 
 
 def db():
@@ -39,10 +64,10 @@ def cmd_add(args):
     with db() as conn:
         conn.execute(
             """INSERT INTO tasks (id, title, description, state, tags, priority,
-               created_at, state_changed_at, agent_confidence, executor)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               created_at, state_changed_at, executor)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (task_id, args.title, args.description or "", "inbox", tags,
-             args.priority, ts, ts, args.confidence or "high", "claude-code")
+             args.priority, ts, ts, "claude-code")
         )
         conn.execute(
             "INSERT INTO events (task_id, event_type, to_state, created_at) VALUES (?, ?, ?, ?)",
@@ -77,7 +102,7 @@ def cmd_get(args):
 
 
 def cmd_update(args):
-    """Transition task state, with guard on double-claim."""
+    """Transition task state."""
     task_id = args.id
     new_state = args.state
     ts = now()
@@ -89,11 +114,6 @@ def cmd_update(args):
             sys.exit(1)
         task = dict(row)
 
-        # Guard: don't claim an already-claimed task
-        if new_state == "in_progress" and task["claimed_by"] and task["claimed_by"] != args.claimed_by:
-            print(json.dumps({"error": "already_claimed", "claimed_by": task["claimed_by"]}))
-            sys.exit(1)
-
         updates = {"state": new_state, "state_changed_at": ts}
         if args.claimed_by:
             updates["claimed_by"] = args.claimed_by
@@ -101,20 +121,10 @@ def cmd_update(args):
         if new_state in ("done", "cancelled", "awaiting_review"):
             updates["claimed_by"] = None
             updates["claimed_at"] = None
-        if args.blocked_reason:
-            updates["blocked_reason"] = args.blocked_reason
         if args.output_summary:
             updates["output_summary"] = args.output_summary
-        if args.confidence:
-            updates["agent_confidence"] = args.confidence
         if args.session_id:
             updates["session_id"] = args.session_id
-
-        if new_state == "revision_queue":
-            updates["iteration_count"] = task["iteration_count"] + 1
-            if updates["iteration_count"] >= MAX_ITERATIONS:
-                updates["state"] = "blocked"
-                updates["blocked_reason"] = updates.get("blocked_reason") or f"Exceeded {MAX_ITERATIONS} iterations"
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         vals = list(updates.values()) + [task_id]
@@ -130,8 +140,8 @@ def cmd_update(args):
 def cmd_follow_up(args):
     """Queue a follow-up prompt for a task that has a Claude Code session.
 
-    Sets state to 'revision_queue' so the worker can resume the session
-    via --resume <session-id>.  The prompt is stored as the event note.
+    Overwrites the task description with the new prompt and sets state to
+    'revision_queue' so the worker resumes the session on the next tick.
     """
     task_id = args.id
     ts = now()
@@ -150,19 +160,11 @@ def cmd_follow_up(args):
             }))
             sys.exit(1)
 
-        iteration = task["iteration_count"] + 1
-        if iteration >= MAX_ITERATIONS:
-            print(json.dumps({
-                "error": f"Task {task_id} has exceeded {MAX_ITERATIONS} iterations"
-            }))
-            sys.exit(1)
-
         updates = {
             "state": "revision_queue",
             "state_changed_at": ts,
-            "iteration_count": iteration,
+            "description": args.prompt,
             "session_id": session_id,
-            "blocked_reason": None,
             "claimed_by": None,
             "claimed_at": None,
         }
@@ -179,18 +181,21 @@ def cmd_follow_up(args):
         "id": task_id,
         "state": "revision_queue",
         "session_id": session_id,
-        "iteration": iteration,
     }))
 
 
 def cmd_next(args):
-    """Claim the next actionable task. revision_queue (resume) takes priority over ready (fresh)."""
+    """Claim the next actionable task. revision_queue/watching (resume) takes priority over ready (fresh)."""
     run_id = args.run_id or f"run_{uuid.uuid4().hex[:8]}"
     ts = now()
     with db() as conn:
         row = None
         mode = None
-        for candidate_state, candidate_mode in [("revision_queue", "resume"), ("ready", "fresh")]:
+        for candidate_state, candidate_mode in [
+            ("revision_queue", "resume"),
+            ("watching", "watch"),
+            ("ready", "fresh"),
+        ]:
             row = conn.execute(
                 """SELECT * FROM tasks
                    WHERE state = ?
@@ -209,8 +214,6 @@ def cmd_next(args):
             return
 
         task_id = row["id"]
-        # Atomic CAS: only claim if state hasn't changed since the SELECT.
-        # Concurrent threads may have selected the same row; rowcount=0 means we lost the race.
         claimed = conn.execute(
             """UPDATE tasks SET state = 'in_progress', claimed_by = ?, claimed_at = ?, state_changed_at = ?
                WHERE id = ? AND state = ?""",
@@ -227,13 +230,6 @@ def cmd_next(args):
 
         result = {**fmt_task(row), "state": "in_progress", "claimed_by": run_id, "mode": mode}
 
-        if mode == "resume":
-            follow_up = conn.execute(
-                "SELECT note FROM events WHERE task_id = ? AND event_type = 'follow-up' ORDER BY created_at DESC LIMIT 1",
-                (task_id,)
-            ).fetchone()
-            result["follow_up_prompt"] = follow_up["note"] if follow_up else None
-
     print(json.dumps(result))
 
 
@@ -241,18 +237,57 @@ def cmd_needs_review(args):
     """List tasks awaiting your attention."""
     with db() as conn:
         rows = conn.execute(
-            "SELECT * FROM tasks WHERE state IN ('awaiting_review', 'blocked') ORDER BY state_changed_at ASC"
+            "SELECT * FROM tasks WHERE state = 'awaiting_review' ORDER BY state_changed_at ASC"
         ).fetchall()
     tasks = [fmt_task(r) for r in rows]
     if not tasks:
         print("No tasks need your attention.")
     else:
         for t in tasks:
-            print(f"[{t['state'].upper()}] {t['id']}: {t['title']}")
+            print(f"[{t['id']}] {t['title']}")
             if t.get("output_summary"):
                 print(f"  Output: {t['output_summary']}")
-            if t.get("blocked_reason"):
-                print(f"  Reason: {t['blocked_reason']}")
+
+
+def cmd_init(args):
+    """Create the DB schema. Safe to run on an existing DB (uses IF NOT EXISTS)."""
+    with db() as conn:
+        conn.executescript(SCHEMA_SQL)
+    print(json.dumps({"status": "ok", "db": DB_PATH}))
+
+
+def cmd_migrate(args):
+    """Rebuild the tasks table to match the current schema, dropping stale columns.
+
+    Preserves all rows. Uses the create-copy-drop-rename workaround required
+    by SQLite < 3.35 which lacks ALTER TABLE DROP COLUMN.
+    """
+    keep = ["id", "title", "description", "state", "tags", "priority",
+            "created_at", "state_changed_at", "executor",
+            "claimed_by", "claimed_at", "output_summary", "session_id"]
+    cols = ", ".join(keep)
+    with db() as conn:
+        conn.executescript(f"""
+            CREATE TABLE tasks_new (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'inbox',
+                tags TEXT DEFAULT '[]',
+                priority INTEGER DEFAULT 5,
+                created_at TEXT,
+                state_changed_at TEXT,
+                executor TEXT DEFAULT 'claude-code',
+                claimed_by TEXT,
+                claimed_at TEXT,
+                output_summary TEXT,
+                session_id TEXT
+            );
+            INSERT INTO tasks_new ({cols}) SELECT {cols} FROM tasks;
+            DROP TABLE tasks;
+            ALTER TABLE tasks_new RENAME TO tasks;
+        """)
+    print(json.dumps({"status": "ok", "message": "tasks table rebuilt with current schema"}))
 
 
 def main():
@@ -264,7 +299,6 @@ def main():
     p_add.add_argument("--description", "-d")
     p_add.add_argument("--tags", nargs="*")
     p_add.add_argument("--priority", type=int, default=5)
-    p_add.add_argument("--confidence", choices=["high", "medium", "low"])
 
     p_list = sub.add_parser("list", help="List tasks")
     p_list.add_argument("--state", "-s")
@@ -276,9 +310,7 @@ def main():
     p_update.add_argument("id")
     p_update.add_argument("--state", "-s", choices=VALID_STATES, required=True)
     p_update.add_argument("--claimed-by")
-    p_update.add_argument("--blocked-reason")
     p_update.add_argument("--output-summary")
-    p_update.add_argument("--confidence", choices=["high", "medium", "low"])
     p_update.add_argument("--session-id")
     p_update.add_argument("--note")
 
@@ -291,6 +323,8 @@ def main():
     p_next.add_argument("--run-id")
 
     sub.add_parser("needs-review", help="Show tasks awaiting your attention")
+    sub.add_parser("init", help="Create DB schema (safe to re-run)")
+    sub.add_parser("migrate", help="Rebuild tasks table to current schema, dropping stale columns")
 
     args = parser.parse_args()
     if not args.cmd:
@@ -300,7 +334,9 @@ def main():
     {"add": cmd_add, "list": cmd_list, "get": cmd_get,
      "update": cmd_update, "next": cmd_next,
      "follow-up": cmd_follow_up,
-     "needs-review": cmd_needs_review}[args.cmd](args)
+     "needs-review": cmd_needs_review,
+     "init": cmd_init,
+     "migrate": cmd_migrate}[args.cmd](args)
 
 
 if __name__ == "__main__":

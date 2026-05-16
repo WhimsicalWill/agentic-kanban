@@ -66,7 +66,7 @@ def process_one(run_id):
             prompt += f"\n\n{task['description']}"
         result = run_claude(prompt)
 
-    else:  # resume
+    elif mode == "resume":
         session_id = task.get("session_id")
         if not session_id:
             tasks_cmd("update", task_id,
@@ -75,30 +75,45 @@ def process_one(run_id):
             print(f"ERROR: {task_id} has no session_id — moved to awaiting_review", file=sys.stderr)
             return True
 
-        follow_up = task.get("follow_up_prompt") or task.get("description", "")
-        if not follow_up:
+        result = run_claude(task.get("description", ""), session_id=session_id)
+
+    else:  # watch
+        session_id = task.get("session_id")
+        if not session_id:
             tasks_cmd("update", task_id,
                       "--state", "awaiting_review",
-                      "--note", "Cannot resume: no follow-up prompt found")
-            print(f"ERROR: {task_id} has no follow-up prompt — moved to awaiting_review", file=sys.stderr)
+                      "--note", "Cannot watch: no session_id stored")
+            print(f"ERROR: {task_id} has no session_id — moved to awaiting_review", file=sys.stderr)
             return True
 
-        result = run_claude(follow_up, session_id=session_id)
+        result = run_claude(task.get("description", ""), session_id=session_id)
 
     output = (result.get("result") or "")[:800]
     new_session_id = result.get("session_id")
     is_error = result.get("is_error", False)
 
-    update_args = ["update", task_id, "--state", "awaiting_review", "--output-summary", output]
-    if new_session_id:
-        update_args += ["--session-id", new_session_id]
-    if is_error:
-        update_args += ["--note", "claude returned is_error=true"]
+    if mode == "watch":
+        # Check if Claude Code already self-transitioned the task.
+        current = tasks_cmd("get", task_id)
+        if current.get("state") != "in_progress":
+            print(f"→ {current.get('state')} [self-transitioned]", file=sys.stderr)
+            return True
+        # No self-transition: default back to watching.
+        update_args = ["update", task_id, "--state", "watching", "--output-summary", output]
+        if new_session_id:
+            update_args += ["--session-id", new_session_id]
+        tasks_cmd(*update_args)
+        print(f"→ watching [{'ERROR' if is_error else 'OK'}]", file=sys.stderr)
+    else:
+        update_args = ["update", task_id, "--state", "awaiting_review", "--output-summary", output]
+        if new_session_id:
+            update_args += ["--session-id", new_session_id]
+        if is_error:
+            update_args += ["--note", "claude returned is_error=true"]
+        tasks_cmd(*update_args)
+        status = "ERROR" if is_error else "OK"
+        print(f"→ awaiting_review [{status}]", file=sys.stderr)
 
-    tasks_cmd(*update_args)
-
-    status = "ERROR" if is_error else "OK"
-    print(f"→ awaiting_review [{status}]", file=sys.stderr)
     if output:
         print(f"Preview: {output[:200]}", file=sys.stderr)
 
@@ -129,15 +144,15 @@ def queue_summary():
 
     needs_review = [t for t in all_tasks if t.get("state") == "awaiting_review"]
     in_progress = [t for t in all_tasks if t.get("state") == "in_progress"]
+    watching = [t for t in all_tasks if t.get("state") == "watching"]
     queued = [t for t in all_tasks if t.get("state") in ("ready", "revision_queue", "inbox")]
-    blocked = [t for t in all_tasks if t.get("state") == "blocked"]
 
     return {
         "time": time_str,
         "needs_review": needs_review,
         "in_progress": in_progress,
+        "watching": watching,
         "queued": queued,
-        "blocked": blocked,
     }
 
 
@@ -198,10 +213,10 @@ def format_whatsapp_report(processed, summary, errors, usage_line=None):
     time_str = summary["time"]
     needs_review = summary["needs_review"]
     in_progress = summary.get("in_progress", [])
+    watching = summary.get("watching", [])
     queued = summary["queued"]
-    blocked = summary["blocked"]
 
-    if processed == 0 and not needs_review and not in_progress and not queued and not blocked:
+    if processed == 0 and not needs_review and not in_progress and not watching and not queued:
         idle_line = f"*Task Queue* · {time_str} — idle, nothing pending"
         if usage_line:
             idle_line += f"\n{usage_line}"
@@ -223,15 +238,18 @@ def format_whatsapp_report(processed, summary, errors, usage_line=None):
         for t in in_progress[:3]:
             lines.append(f"· {t['title']}")
 
+    if watching:
+        lines.append("*Watching:*")
+        for t in watching[:3]:
+            summary_preview = (t.get("output_summary") or "")[:60]
+            lines.append(f"· {t['title']}: {summary_preview}")
+
     if queued:
         lines.append("*Queued:*")
         for t in queued[:3]:
             lines.append(f"· [{t['state']}] {t['title']}")
     else:
         lines.append("*Queued:* none")
-
-    if blocked:
-        lines.append(f"*Blocked:* {len(blocked)} task(s) need attention")
 
     if errors:
         lines.append(f"*Issues:* {'; '.join(errors)}")
