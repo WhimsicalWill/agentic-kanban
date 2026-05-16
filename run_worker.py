@@ -45,7 +45,7 @@ def run_claude(prompt, session_id=None):
     try:
         return json.loads(stdout)
     except json.JSONDecodeError:
-        return {"is_error": True, "result": stdout[:800], "session_id": None}
+        return {"is_error": True, "result": stdout, "session_id": None}
 
 
 def build_prompt(task_id, mode, task):
@@ -95,7 +95,7 @@ def process_one(run_id, exclude=()):
 
         result = run_claude(build_prompt(task_id, mode, task), session_id=session_id)
 
-    output = (result.get("result") or "")[:800]
+    output = result.get("result") or ""
     new_session_id = result.get("session_id")
     is_error = result.get("is_error", False)
 
@@ -239,7 +239,7 @@ def format_whatsapp_report(processed, summary, errors, usage_line=None):
     if needs_review:
         lines.append("*Needs your review:*")
         for t in needs_review[:3]:
-            summary_preview = (t.get("output_summary") or "")[:60]
+            summary_preview = t.get("output_summary") or ""
             lines.append(f"· [{t['id']}] {t['title']}: {summary_preview}")
     else:
         lines.append("*Needs your review:* none")
@@ -252,7 +252,7 @@ def format_whatsapp_report(processed, summary, errors, usage_line=None):
     if watching:
         lines.append("*Watching:*")
         for t in watching[:3]:
-            summary_preview = (t.get("output_summary") or "")[:60]
+            summary_preview = t.get("output_summary") or ""
             lines.append(f"· {t['title']}: {summary_preview}")
 
     if queued:
